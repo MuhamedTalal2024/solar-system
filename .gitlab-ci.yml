@@ -1,0 +1,147 @@
+workflow:
+  name: Solar System NodeJs Pipeline
+  rules:
+     - if: $CI_COMMIT_BRANCH == 'main' || $CI_COMMIT_BRANCH =~ /^feature/
+       when: always
+     - if: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME =~ /^feature/ && $CI_PIPELINE_SOURCE == 'merge_request_event'
+       when: always
+
+stages:
+    - test
+    - containerization
+
+variables:
+  DOCKER_USERNAME: anushakuppili19
+  IMAGE_VERSION: $CI_PIPELINE_ID
+
+unit_testing:
+    stage: test
+    image: node:22-alpine3.21
+    services:
+      - name: siddharth67/mongo-db:non-prod
+        alias: mongo
+        pull_policy: always
+    variables:
+      MONGO_URI: 'mongodb://mongo:27017/superData'
+      MONGO_USERNAME: non-prod-user
+      MONGO_PASSWORD: non-prod-password
+    cache:
+        policy: pull-push
+        when: always
+        paths:
+          - node_modules
+        key:
+          files:
+            - package-lock.json
+          prefix: node_modules
+    before_script:
+        - npm install
+    script:
+        - npm test
+    artifacts:
+      untracked: false
+      when: always
+      access: all
+      expire_in: 3 days
+      name: Mocha-Test-Result
+      paths:
+        - test-results.xml
+      reports:
+        junit: test-results.xml
+
+code_coverage:
+    stage: test
+    image: node:22-alpine3.21
+    services:
+      - name: siddharth67/mongo-db:non-prod
+        alias: mongo
+        pull_policy: always
+    variables:
+      MONGO_URI: 'mongodb://mongo:27017/superData'
+      MONGO_USERNAME: non-prod-user
+      MONGO_PASSWORD: non-prod-password
+    cache:
+      policy: pull-push
+      when: always
+      paths:
+        - node_modules
+      key:
+        files:
+          - package-lock.json
+        prefix: node_modules
+    before_script:
+        - npm install
+    script:
+        - npm run coverage
+    artifacts:
+      untracked: false
+      when: always
+      access: all
+      expire_in: 3 days
+      name: Code-Coverage-Results
+      reports:
+        coverage_report:
+          coverage_format: cobertura
+          path: coverage/cobertura-coverage.xml
+    coverage: /All files[^|]*\|[^|]*\s+([\d\.]+)/
+    allow_failure: true
+
+docker_build:
+  stage: containerization
+  image: docker:24.0.5
+  dependencies: []
+  services:
+    - docker:24.0.5-dind
+  script:
+    - docker build -t $DOCKER_USERNAME/solar-system:$IMAGE_VERSION .
+    - docker images $DOCKER_USERNAME/solar-system:$IMAGE_VERSION
+    - mkdir image
+    - docker save $DOCKER_USERNAME/solar-system:$IMAGE_VERSION > image/solar-system-image-$IMAGE_VERSION.tar
+  artifacts:
+    paths:
+      - image
+    when: always
+    access: all
+    expire_in: 3 days
+docker_test:
+  stage: containerization
+  image: docker:24.0.5
+  needs:
+    - docker_build
+  services:
+    - docker:24.0.5-dind
+  script:
+    - docker load -i image/solar-system-image-$CI_PIPELINE_ID.tar
+    - docker run --name solar-system-app -d -p 3000:3000 $DOCKER_USERNAME/solar-system:$IMAGE_VERSION
+    - export IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' solar-system-app)
+    - echo $IP
+    - docker run alpine wget -q -O - http://$IP:3000/live | grep live
+
+docker_push:
+  stage: containerization
+  needs:
+    - docker_build
+    - docker_test
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  script:
+    - docker load -i image/solar-system-image-$CI_PIPELINE_ID.tar
+    - docker login --username=$DOCKER_USERNAME --password=$DOCKER_PASSWORD
+    - docker push $DOCKER_USERNAME/solar-system:$IMAGE_VERSION
+
+publish_gitlab_container_registry:
+  stage: containerization
+  needs:
+    - docker_build
+    - docker_test
+  image: docker:24.0.5
+  services:
+    - docker:24.0.5-dind
+  script:
+    - docker load -i image/solar-system-image-$CI_PIPELINE_ID.tar
+    - echo "$CI_REGISTRY -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY_IMAGE"
+    - docker login $CI_REGISTRY -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD
+    - docker tag $DOCKER_USERNAME/solar-system:$IMAGE_VERSION $CI_REGISTRY_IMAGE/ss-image:$IMAGE_VERSION
+    - docker images
+    - docker push $CI_REGISTRY_IMAGE/ss-image:$IMAGE_VERSION
